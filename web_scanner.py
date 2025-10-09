@@ -846,6 +846,343 @@ async def root():
     """
 
 
+def generate_schema_based_tests(schema: List[FieldSchema], standards: List[str]) -> dict:
+    """
+    Generate security tests based on field schema and selected standards.
+    Properly aligned with STRIDE threat model, OWASP Top 10, and PCI-DSS requirements.
+    
+    Returns dict with:
+    - payloads: List of test payloads to send
+    - test_types: Type of tests (STRIDE, OWASP, PCI-DSS)
+    - base_payload: The base payload structure
+    """
+    result = {
+        "payloads": [],
+        "test_types": [],
+        "base_payload": {}
+    }
+    
+    # Build base payload from schema
+    base_payload = {}
+    for field in schema:
+        if field.type == 'integer':
+            try:
+                base_payload[field.name] = int(field.sample_value) if field.sample_value else 0
+            except:
+                base_payload[field.name] = 0
+        elif field.type == 'float':
+            try:
+                base_payload[field.name] = float(field.sample_value) if field.sample_value else 0.0
+            except:
+                base_payload[field.name] = 0.0
+        elif field.type == 'boolean':
+            base_payload[field.name] = str(field.sample_value).lower() in ['true', '1', 'yes'] if field.sample_value else False
+        else:
+            base_payload[field.name] = field.sample_value if field.sample_value else ""
+    
+    result["base_payload"] = base_payload
+    
+    # Generate tests based on selected standards
+    if not standards or len(standards) == 0:
+        standards = ["STRIDE"]  # Default
+    
+    from webhook_auditor.scanner.injection_tests import INJECTION_PAYLOADS
+    
+    for standard in standards:
+        if standard == "STRIDE":
+            result["test_types"].append("STRIDE")
+            
+            # ===== STRIDE THREAT MODEL TESTS =====
+            
+            # 1. SPOOFING (Authentication)
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-Spoofing] Request without authentication",
+                data=json.dumps({"__skip_signature__": True, **base_payload})
+            ))
+            
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-Spoofing] Request with invalid signature",
+                data=json.dumps({"__invalid_signature__": True, **base_payload})
+            ))
+            
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-Spoofing] Request with empty signature",
+                data=json.dumps({"__empty_signature__": True, **base_payload})
+            ))
+            
+            # 2. TAMPERING (Integrity)
+            tampered_payload = base_payload.copy()
+            for field in schema:
+                if field.type == 'string':
+                    tampered_payload[field.name] = str(tampered_payload.get(field.name, "")) + "_MODIFIED"
+                    break
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-Tampering] Modified payload integrity check",
+                data=json.dumps(tampered_payload)
+            ))
+            
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-Tampering] HTTPS/TLS 1.2+ enforcement check",
+                data=json.dumps({"__check_https__": True, **base_payload})
+            ))
+            
+            # 3. REPUDIATION (Logging & Audit Trail)
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-Repudiation] Logging mechanism check",
+                data=json.dumps({"__check_logging__": True, **base_payload})
+            ))
+            
+            old_timestamp_payload = base_payload.copy()
+            old_timestamp_payload["timestamp"] = "2020-01-01T00:00:00Z"
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-Repudiation] Replay attack with old timestamp",
+                data=json.dumps(old_timestamp_payload)
+            ))
+            
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-Repudiation] Duplicate request detection",
+                data=json.dumps({"__duplicate_request__": True, **base_payload})
+            ))
+            
+            # 4. INFORMATION DISCLOSURE
+            sensitive_payload = base_payload.copy()
+            sensitive_payload.update({
+                "api_key": "sk_test_51234567890",
+                "password": "Password123!",
+                "secret_token": "ghp_1234567890abcdef"
+            })
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-InfoDisclosure] Sensitive data in payload",
+                data=json.dumps(sensitive_payload)
+            ))
+            
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-InfoDisclosure] Error message information leakage",
+                data=json.dumps({"invalid": "data", "__trigger_error__": True})
+            ))
+            
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-InfoDisclosure] Verbose headers check",
+                data=json.dumps({"__check_headers__": True, **base_payload})
+            ))
+            
+            # 5. DENIAL OF SERVICE
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-DoS] Rate limiting check",
+                data=json.dumps({"__rate_limit_test__": True, **base_payload})
+            ))
+            
+            large_payload = base_payload.copy()
+            large_payload["large_field"] = "A" * (15 * 1024 * 1024)  # 15MB
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-DoS] Large payload rejection (>10MB)",
+                data=json.dumps(large_payload)
+            ))
+            
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-DoS] Async processing timeout",
+                data=json.dumps({"__check_timeout__": True, **base_payload})
+            ))
+            
+            # 6. ELEVATION OF PRIVILEGE
+            # SQL Injection on all string fields
+            for field in schema:
+                if field.type in ['string', 'email', 'url']:
+                    for i, sql_payload in enumerate(INJECTION_PAYLOADS.get("sql", [])[:2]):
+                        test_data = base_payload.copy()
+                        test_data[field.name] = sql_payload
+                        result["payloads"].append(TestPayload(
+                            name=f"[STRIDE-Privilege] SQL Injection on '{field.name}' #{i+1}",
+                            data=json.dumps(test_data)
+                        ))
+            
+            # Command Injection
+            for field in schema:
+                if field.type == 'string':
+                    for i, cmd_payload in enumerate(INJECTION_PAYLOADS.get("command", [])[:2]):
+                        test_data = base_payload.copy()
+                        test_data[field.name] = cmd_payload
+                        result["payloads"].append(TestPayload(
+                            name=f"[STRIDE-Privilege] Command Injection on '{field.name}' #{i+1}",
+                            data=json.dumps(test_data)
+                        ))
+            
+            # Privilege escalation via role field
+            for field in schema:
+                if any(keyword in field.name.lower() for keyword in ['role', 'permission', 'admin', 'privilege']):
+                    for value in ['admin', 'superuser', 'root']:
+                        test_data = base_payload.copy()
+                        test_data[field.name] = value
+                        result["payloads"].append(TestPayload(
+                            name=f"[STRIDE-Privilege] Privilege escalation via '{field.name}' = {value}",
+                            data=json.dumps(test_data)
+                        ))
+        
+        elif standard in ["PCI-DSS", "PCI DSS"]:
+            result["test_types"].append("PCI-DSS")
+            
+            # ===== PCI-DSS COMPLIANCE TESTS =====
+            
+            # CARDHOLDER DATA PROTECTION (CHD)
+            card_numbers = ["4111111111111111", "5500000000000004", "378282246310005"]
+            for field in schema:
+                if field.type in ['string', 'integer']:
+                    for i, card_number in enumerate(card_numbers):
+                        test_data = base_payload.copy()
+                        test_data[field.name] = card_number
+                        result["payloads"].append(TestPayload(
+                            name=f"[PCI-DSS-CHD] Credit card in '{field.name}' #{i+1}",
+                            data=json.dumps(test_data)
+                        ))
+            
+            # CVV in payload
+            test_data = base_payload.copy()
+            test_data.update({"cvv": "123", "cvc": "456", "security_code": "789"})
+            result["payloads"].append(TestPayload(
+                name="[PCI-DSS-CHD] CVV/CVC in payload",
+                data=json.dumps(test_data)
+            ))
+            
+            # Tokenization check
+            result["payloads"].append(TestPayload(
+                name="[PCI-DSS-CHD] Tokenization check",
+                data=json.dumps({"card_token": "tok_visa_4111", **base_payload})
+            ))
+            
+            # Requirement 6.5.1: Injection Flaws
+            for field in schema:
+                if field.type in ['string', 'email', 'url']:
+                    for i, sql_payload in enumerate(INJECTION_PAYLOADS.get("sql", [])[:2]):
+                        test_data = base_payload.copy()
+                        test_data[field.name] = sql_payload
+                        result["payloads"].append(TestPayload(
+                            name=f"[PCI-DSS-6.5.1] SQL Injection on '{field.name}' #{i+1}",
+                            data=json.dumps(test_data)
+                        ))
+            
+            # Requirement 6.5.7: XSS
+            for field in schema:
+                if field.type in ['string', 'email']:
+                    for i, xss_payload in enumerate(INJECTION_PAYLOADS.get("xss", [])[:2]):
+                        test_data = base_payload.copy()
+                        test_data[field.name] = xss_payload
+                        result["payloads"].append(TestPayload(
+                            name=f"[PCI-DSS-6.5.7] XSS on '{field.name}' #{i+1}",
+                            data=json.dumps(test_data)
+                        ))
+            
+            # Requirement 6.5.8: Buffer overflow
+            large_payload = base_payload.copy()
+            large_payload["buffer_overflow_test"] = "A" * (100 * 1024 * 1024)  # 100MB
+            result["payloads"].append(TestPayload(
+                name="[PCI-DSS-6.5.8] Buffer overflow protection",
+                data=json.dumps(large_payload)
+            ))
+            
+            # Requirement 6.5.10: Authentication
+            result["payloads"].append(TestPayload(
+                name="[PCI-DSS-6.5.10] Empty authentication rejection",
+                data=json.dumps({"__empty_auth__": True, **base_payload})
+            ))
+        
+        elif standard == "OWASP":
+            result["test_types"].append("OWASP")
+            
+            # ===== OWASP TOP 10 TESTS =====
+            
+            # A01: Broken Access Control
+            result["payloads"].append(TestPayload(
+                name="[OWASP-A01] Cross-account data access",
+                data=json.dumps({"user_id": "OTHER_USER_12345", "account_id": "VICTIM_789", **base_payload})
+            ))
+            
+            for field in schema:
+                if any(keyword in field.name.lower() for keyword in ['role', 'permission', 'admin']):
+                    test_data = base_payload.copy()
+                    test_data[field.name] = "admin"
+                    result["payloads"].append(TestPayload(
+                        name=f"[OWASP-A01] Privilege escalation via '{field.name}'",
+                        data=json.dumps(test_data)
+                    ))
+            
+            # A03: Injection
+            for field in schema:
+                if field.type in ['string', 'email', 'url']:
+                    # SQL Injection
+                    for i, sql_payload in enumerate(INJECTION_PAYLOADS.get("sql", [])[:2]):
+                        test_data = base_payload.copy()
+                        test_data[field.name] = sql_payload
+                        result["payloads"].append(TestPayload(
+                            name=f"[OWASP-A03] SQL Injection on '{field.name}' #{i+1}",
+                            data=json.dumps(test_data)
+                        ))
+                    
+                    # NoSQL Injection
+                    nosql_payloads = ['{"$ne": null}', '{"$gt": ""}']
+                    for i, nosql_payload in enumerate(nosql_payloads):
+                        test_data = base_payload.copy()
+                        test_data[field.name] = nosql_payload
+                        result["payloads"].append(TestPayload(
+                            name=f"[OWASP-A03] NoSQL Injection on '{field.name}' #{i+1}",
+                            data=json.dumps(test_data)
+                        ))
+            
+            # Command Injection
+            for field in schema:
+                if field.type == 'string':
+                    for i, cmd_payload in enumerate(INJECTION_PAYLOADS.get("command", [])[:1]):
+                        test_data = base_payload.copy()
+                        test_data[field.name] = cmd_payload
+                        result["payloads"].append(TestPayload(
+                            name=f"[OWASP-A03] Command Injection on '{field.name}' #{i+1}",
+                            data=json.dumps(test_data)
+                        ))
+            
+            # A05: Security Misconfiguration - Path Traversal
+            for field in schema:
+                if any(keyword in field.name.lower() for keyword in ['file', 'path', 'filename', 'dir']):
+                    path_payloads = ['../../../etc/passwd', '..\\..\\..\\windows\\system32\\config\\sam']
+                    for i, path_payload in enumerate(path_payloads):
+                        test_data = base_payload.copy()
+                        test_data[field.name] = path_payload
+                        result["payloads"].append(TestPayload(
+                            name=f"[OWASP-A05] Path Traversal on '{field.name}' #{i+1}",
+                            data=json.dumps(test_data)
+                        ))
+            
+            # A07: XSS
+            for field in schema:
+                if field.type in ['string', 'email']:
+                    for i, xss_payload in enumerate(INJECTION_PAYLOADS.get("xss", [])[:2]):
+                        test_data = base_payload.copy()
+                        test_data[field.name] = xss_payload
+                        result["payloads"].append(TestPayload(
+                            name=f"[OWASP-A07] XSS on '{field.name}' #{i+1}",
+                            data=json.dumps(test_data)
+                        ))
+            
+            # A10: SSRF (Server-Side Request Forgery)
+            internal_ips = [
+                "http://localhost/admin",
+                "http://127.0.0.1/admin",
+                "http://10.0.0.1/internal",
+                "http://192.168.1.1/admin",
+                "http://169.254.169.254/latest/meta-data/"
+            ]
+            
+            for field in schema:
+                if field.type in ['url', 'string'] and any(keyword in field.name.lower() for keyword in ['url', 'webhook', 'callback', 'link']):
+                    for i, internal_ip in enumerate(internal_ips):
+                        test_data = base_payload.copy()
+                        test_data[field.name] = internal_ip
+                        result["payloads"].append(TestPayload(
+                            name=f"[OWASP-A10] SSRF on '{field.name}' - Internal IP #{i+1}",
+                            data=json.dumps(test_data)
+                        ))
+    
+    return result
+
+
 def generate_injection_payloads(schema: List[FieldSchema]) -> List[TestPayload]:
     """
     Generate injection test payloads based on field schema.
@@ -976,22 +1313,25 @@ async def scan_webhook(request: ScanRequest):
     Run a comprehensive security scan against a webhook endpoint.
     
     Performs security tests based on selected standards (STRIDE, PCI-DSS, OWASP).
-    Automatically generates injection tests based on payload schema.
+    Automatically generates tests based on payload schema.
     """
     try:
         all_results = []
         
-        # Mode 1: Schema-based injection testing
+        # Mode 1: Schema-based testing with standards
         if request.payload_schema and len(request.payload_schema) > 0:
-            print(f"🎯 Schema-based mode: Testing injection on {len(request.payload_schema)} fields")
+            standards = request.test_standards if request.test_standards else ["STRIDE"]
+            print(f"🎯 Schema-based mode: {len(request.payload_schema)} fields, Standards: {', '.join(standards)}")
             
-            # Generate injection payloads from schema
-            injection_payloads = generate_injection_payloads(request.payload_schema)
-            print(f"✨ Generated {len(injection_payloads)} injection test payloads")
+            # Generate tests based on schema and selected standards
+            test_data = generate_schema_based_tests(request.payload_schema, standards)
+            test_payloads = test_data["payloads"]
             
-            # Test each injection payload
+            print(f"✨ Generated {len(test_payloads)} test payloads for {', '.join(test_data['test_types'])}")
+            
+            # Test each payload
             async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-                for idx, payload in enumerate(injection_payloads, 1):
+                for idx, payload in enumerate(test_payloads, 1):
                     try:
                         # Parse the payload
                         payload_dict = json.loads(payload.data)
@@ -1022,18 +1362,27 @@ async def scan_webhook(request: ScanRequest):
                         status = response.status_code
                         response_text = response.text[:500]  # First 500 chars
                         
+                        # Determine category from payload name
+                        category = "Security Testing"
+                        if "STRIDE" in payload.name:
+                            category = "STRIDE Security"
+                        elif "PCI-DSS" in payload.name:
+                            category = "PCI DSS Compliance"
+                        elif "OWASP" in payload.name:
+                            category = "OWASP Top 10"
+                        
                         # Determine result
                         if 400 <= status < 500:
                             # Server rejected - PASS
                             all_results.append({
-                                "category": "Injection Testing",
+                                "category": category,
                                 "name": payload.name,
                                 "status": "PASS",
                                 "details": f"Server properly rejected malicious payload (HTTP {status})",
-                                "payload_name": f"[{idx}/{len(injection_payloads)}] {payload.name}"
+                                "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}"
                             })
                         elif status == 200:
-                            # Server accepted - need to check for signs of injection
+                            # Server accepted - check for danger signs
                             danger_signs = [
                                 "error", "exception", "syntax", "mysql", "postgresql", 
                                 "sqlite", "oracle", "warning", "undefined", "null",
@@ -1045,42 +1394,42 @@ async def scan_webhook(request: ScanRequest):
                             
                             if found_danger:
                                 all_results.append({
-                                    "category": "Injection Testing",
+                                    "category": category,
                                     "name": payload.name,
                                     "status": "FAIL",
                                     "details": f"Server accepted payload and response contains suspicious content (HTTP {status})",
-                                    "risk": "Potential injection vulnerability - server may be processing malicious input",
-                                    "mitigation": "Implement input validation and sanitization. Use parameterized queries. Escape special characters.",
-                                    "payload_name": f"[{idx}/{len(injection_payloads)}] {payload.name}"
+                                    "risk": "Potential vulnerability - server may be processing malicious input without proper validation",
+                                    "mitigation": "Implement input validation, sanitization, and use parameterized queries. Escape special characters.",
+                                    "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}"
                                 })
                             else:
                                 all_results.append({
-                                    "category": "Injection Testing",
+                                    "category": category,
                                     "name": payload.name,
                                     "status": "PASS",
                                     "details": f"Server handled payload safely without exposing sensitive information (HTTP {status})",
-                                    "payload_name": f"[{idx}/{len(injection_payloads)}] {payload.name}"
+                                    "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}"
                                 })
                         else:
                             # Other status codes
                             all_results.append({
-                                "category": "Injection Testing",
+                                "category": category,
                                 "name": payload.name,
                                 "status": "WARN",
                                 "details": f"Unexpected response: HTTP {status}",
-                                "payload_name": f"[{idx}/{len(injection_payloads)}] {payload.name}"
+                                "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}"
                             })
                     
                     except Exception as e:
                         all_results.append({
-                            "category": "Injection Testing",
+                            "category": "Security Testing",
                             "name": payload.name,
                             "status": "WARN",
                             "details": f"Test error: {str(e)}",
-                            "payload_name": f"[{idx}/{len(injection_payloads)}] {payload.name}"
+                            "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}"
                         })
         
-        # Mode 2: Full STRIDE/PCI-DSS/OWASP testing
+        # Mode 2: Full STRIDE/PCI-DSS/OWASP testing with traditional payloads
         else:
             print(f"🔍 Full security testing mode")
             
