@@ -979,48 +979,138 @@ async def scan_webhook(request: ScanRequest):
     Automatically generates injection tests based on payload schema.
     """
     try:
-        # Determine which payloads to test
-        payloads_to_test = []
-        
-        # Priority 1: If payload_schema is provided, generate injection tests
-        if request.payload_schema and len(request.payload_schema) > 0:
-            payloads_to_test = generate_injection_payloads(request.payload_schema)
-            print(f"✨ Generated {len(payloads_to_test)} injection test payloads from schema")
-        
-        # Priority 2: Use test_payloads if provided
-        elif request.test_payloads and len(request.test_payloads) > 0:
-            payloads_to_test = request.test_payloads
-        
-        # Priority 3: Fallback to single default payload
-        else:
-            payloads_to_test = [TestPayload(name="Default", data=request.sample_valid_payload)]
-        
         all_results = []
         
-        # Run tests for each payload
-        for idx, payload in enumerate(payloads_to_test, 1):
-            # Create scanner configuration with this payload
-            config = ScannerSettings(
-                target_url=request.target_url,
-                http_method=request.http_method,
-                shared_secret=request.shared_secret,
-                signature_header_name=request.signature_header_name,
-                timestamp_header_name=request.timestamp_header_name,
-                sample_valid_payload=payload.data,
-                signature_prefix=request.signature_prefix,
-                custom_headers=request.custom_headers,
-                test_standards=request.test_standards if request.test_standards else ["STRIDE"]
-            )
+        # Mode 1: Schema-based injection testing
+        if request.payload_schema and len(request.payload_schema) > 0:
+            print(f"🎯 Schema-based mode: Testing injection on {len(request.payload_schema)} fields")
             
-            # Run all tests using orchestrator
-            payload_results = await run_stride_tests(config)
+            # Generate injection payloads from schema
+            injection_payloads = generate_injection_payloads(request.payload_schema)
+            print(f"✨ Generated {len(injection_payloads)} injection test payloads")
             
-            # Add payload info to each result
-            for result in payload_results:
-                if len(payloads_to_test) > 1:
-                    result["payload_name"] = f"[{idx}/{len(payloads_to_test)}] {payload.name}"
-                    result["name"] = f"{result['name']}"
-                all_results.append(result)
+            # Test each injection payload
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                for idx, payload in enumerate(injection_payloads, 1):
+                    try:
+                        # Parse the payload
+                        payload_dict = json.loads(payload.data)
+                        payload_bytes = payload.data.encode('utf-8')
+                        
+                        # Prepare headers
+                        headers = {"Content-Type": "application/json"}
+                        if request.custom_headers:
+                            headers.update(request.custom_headers)
+                        
+                        # Add signature if secret provided
+                        if request.shared_secret:
+                            from webhook_auditor.utils.crypto import calculate_hmac_signature
+                            secret_bytes = request.shared_secret.encode('utf-8')
+                            signature = calculate_hmac_signature(secret_bytes, payload_bytes, request.signature_prefix)
+                            headers[request.signature_header_name] = signature
+                        
+                        # Send request
+                        response = await client.request(
+                            request.http_method,
+                            request.target_url,
+                            content=payload_bytes,
+                            headers=headers,
+                            timeout=10.0
+                        )
+                        
+                        # Analyze response
+                        status = response.status_code
+                        response_text = response.text[:500]  # First 500 chars
+                        
+                        # Determine result
+                        if 400 <= status < 500:
+                            # Server rejected - PASS
+                            all_results.append({
+                                "category": "Injection Testing",
+                                "name": payload.name,
+                                "status": "PASS",
+                                "details": f"Server properly rejected malicious payload (HTTP {status})",
+                                "payload_name": f"[{idx}/{len(injection_payloads)}] {payload.name}"
+                            })
+                        elif status == 200:
+                            # Server accepted - need to check for signs of injection
+                            danger_signs = [
+                                "error", "exception", "syntax", "mysql", "postgresql", 
+                                "sqlite", "oracle", "warning", "undefined", "null",
+                                "stack trace", "line ", "file:", "/usr/", "/etc/",
+                                "root:", "admin", "password"
+                            ]
+                            
+                            found_danger = any(sign in response_text.lower() for sign in danger_signs)
+                            
+                            if found_danger:
+                                all_results.append({
+                                    "category": "Injection Testing",
+                                    "name": payload.name,
+                                    "status": "FAIL",
+                                    "details": f"Server accepted payload and response contains suspicious content (HTTP {status})",
+                                    "risk": "Potential injection vulnerability - server may be processing malicious input",
+                                    "mitigation": "Implement input validation and sanitization. Use parameterized queries. Escape special characters.",
+                                    "payload_name": f"[{idx}/{len(injection_payloads)}] {payload.name}"
+                                })
+                            else:
+                                all_results.append({
+                                    "category": "Injection Testing",
+                                    "name": payload.name,
+                                    "status": "PASS",
+                                    "details": f"Server handled payload safely without exposing sensitive information (HTTP {status})",
+                                    "payload_name": f"[{idx}/{len(injection_payloads)}] {payload.name}"
+                                })
+                        else:
+                            # Other status codes
+                            all_results.append({
+                                "category": "Injection Testing",
+                                "name": payload.name,
+                                "status": "WARN",
+                                "details": f"Unexpected response: HTTP {status}",
+                                "payload_name": f"[{idx}/{len(injection_payloads)}] {payload.name}"
+                            })
+                    
+                    except Exception as e:
+                        all_results.append({
+                            "category": "Injection Testing",
+                            "name": payload.name,
+                            "status": "WARN",
+                            "details": f"Test error: {str(e)}",
+                            "payload_name": f"[{idx}/{len(injection_payloads)}] {payload.name}"
+                        })
+        
+        # Mode 2: Full STRIDE/PCI-DSS/OWASP testing
+        else:
+            print(f"🔍 Full security testing mode")
+            
+            # Determine which payloads to use
+            payloads_to_test = []
+            if request.test_payloads and len(request.test_payloads) > 0:
+                payloads_to_test = request.test_payloads
+            else:
+                payloads_to_test = [TestPayload(name="Default", data=request.sample_valid_payload)]
+            
+            # Run tests for each payload
+            for idx, payload in enumerate(payloads_to_test, 1):
+                config = ScannerSettings(
+                    target_url=request.target_url,
+                    http_method=request.http_method,
+                    shared_secret=request.shared_secret,
+                    signature_header_name=request.signature_header_name,
+                    timestamp_header_name=request.timestamp_header_name,
+                    sample_valid_payload=payload.data,
+                    signature_prefix=request.signature_prefix,
+                    custom_headers=request.custom_headers,
+                    test_standards=request.test_standards if request.test_standards else ["STRIDE"]
+                )
+                
+                payload_results = await run_stride_tests(config)
+                
+                for result in payload_results:
+                    if len(payloads_to_test) > 1:
+                        result["payload_name"] = f"[{idx}/{len(payloads_to_test)}] {payload.name}"
+                    all_results.append(result)
         
         # Calculate statistics
         total_tests = len(all_results)
