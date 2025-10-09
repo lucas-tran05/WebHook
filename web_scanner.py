@@ -11,6 +11,7 @@ from pydantic import BaseModel, HttpUrl, Field
 from typing import Optional, List, Dict
 import asyncio
 import httpx
+import json
 from datetime import datetime
 
 # Import scanner components
@@ -37,6 +38,19 @@ app.add_middleware(
 )
 
 
+class FieldSchema(BaseModel):
+    """Model for field definition in payload schema."""
+    name: str = Field(..., description="Field name")
+    type: str = Field(..., description="Data type: string, integer, float, boolean, email, url, json, array")
+    sample_value: Optional[str] = Field(default=None, description="Sample value for this field")
+
+
+class TestPayload(BaseModel):
+    """Model for individual test payload."""
+    name: str = Field(..., description="Name/description of the payload")
+    data: str = Field(..., description="Payload data (JSON string)")
+
+
 class ScanRequest(BaseModel):
     """Request model for security scan."""
     target_url: str = Field(..., description="Webhook endpoint URL to scan")
@@ -44,7 +58,9 @@ class ScanRequest(BaseModel):
     http_method: str = Field(default="POST", description="HTTP method")
     signature_header_name: str = Field(default="X-Webhook-Signature", description="Signature header name")
     timestamp_header_name: Optional[str] = Field(default="X-Webhook-Timestamp", description="Timestamp header name")
-    sample_valid_payload: str = Field(default='{"event": "test", "data": "sample"}', description="Sample payload")
+    sample_valid_payload: str = Field(default='{"event": "test", "data": "sample"}', description="Sample payload (fallback)")
+    payload_schema: Optional[List[FieldSchema]] = Field(default=None, description="Field-based schema for automatic test generation")
+    test_payloads: Optional[List[TestPayload]] = Field(default=None, description="List of test payloads to use (deprecated)")
     signature_prefix: str = Field(default="sha256=", description="Signature prefix")
     custom_headers: Optional[Dict[str, str]] = Field(default=None, description="Additional custom headers")
     test_standards: Optional[List[str]] = Field(
@@ -236,6 +252,34 @@ async def root():
                 border-left: 5px solid;
                 border-radius: 10px;
             }
+            
+            .field-item {
+                background: #f8f9fa;
+                transition: all 0.3s ease;
+            }
+            
+            .field-item:hover {
+                background: #e9ecef;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            }
+            
+            .field-name, .field-type, .field-value {
+                font-weight: 500;
+            }
+            
+            .remove-field {
+                transition: all 0.2s;
+            }
+            
+            .remove-field:hover {
+                transform: scale(1.1);
+            }
+            
+            .small {
+                font-size: 0.85rem;
+                font-weight: 600;
+                color: #495057;
+            }
         </style>
     </head>
     <body>
@@ -292,12 +336,90 @@ async def root():
                         
                         <div class="row">
                             <div class="col-md-12 mb-3">
-                                <label for="sample_payload" class="form-label">
-                                    <i class="bi bi-file-code"></i> Sample Payload (JSON)
+                                <label class="form-label">
+                                    <i class="bi bi-file-code"></i> Payload Schema (Field Definitions)
                                 </label>
-                                <textarea class="form-control font-monospace" id="sample_payload" rows="4" 
-                                          placeholder='{"event": "test", "data": "sample"}'>{"event": "test", "data": "sample"}</textarea>
-                                <div class="form-text">Valid JSON format required</div>
+                                <div class="alert alert-info">
+                                    <i class="bi bi-info-circle"></i> Define your webhook payload structure. 
+                                    The scanner will automatically generate injection test cases for each field based on its data type.
+                                </div>
+                                <div id="fields_container">
+                                    <!-- Field items will be added here -->
+                                    <div class="field-item border rounded p-3 mb-2">
+                                        <div class="row align-items-end">
+                                            <div class="col-md-4">
+                                                <label class="form-label small">Field Name</label>
+                                                <input type="text" class="form-control form-control-sm field-name" 
+                                                       placeholder="e.g., event" value="event">
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label small">Data Type</label>
+                                                <select class="form-select form-select-sm field-type">
+                                                    <option value="string" selected>String</option>
+                                                    <option value="integer">Integer</option>
+                                                    <option value="float">Float</option>
+                                                    <option value="boolean">Boolean</option>
+                                                    <option value="email">Email</option>
+                                                    <option value="url">URL</option>
+                                                    <option value="json">JSON Object</option>
+                                                    <option value="array">Array</option>
+                                                </select>
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label small">Sample Value</label>
+                                                <input type="text" class="form-control form-control-sm field-value" 
+                                                       placeholder="e.g., user.created" value="user.created">
+                                            </div>
+                                            <div class="col-md-1">
+                                                <button type="button" class="btn btn-sm btn-outline-danger remove-field w-100">
+                                                    <i class="bi bi-trash"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="field-item border rounded p-3 mb-2">
+                                        <div class="row align-items-end">
+                                            <div class="col-md-4">
+                                                <label class="form-label small">Field Name</label>
+                                                <input type="text" class="form-control form-control-sm field-name" 
+                                                       placeholder="e.g., user_id" value="user_id">
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label small">Data Type</label>
+                                                <select class="form-select form-select-sm field-type">
+                                                    <option value="string">String</option>
+                                                    <option value="integer" selected>Integer</option>
+                                                    <option value="float">Float</option>
+                                                    <option value="boolean">Boolean</option>
+                                                    <option value="email">Email</option>
+                                                    <option value="url">URL</option>
+                                                    <option value="json">JSON Object</option>
+                                                    <option value="array">Array</option>
+                                                </select>
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label small">Sample Value</label>
+                                                <input type="text" class="form-control form-control-sm field-value" 
+                                                       placeholder="e.g., 12345" value="12345">
+                                            </div>
+                                            <div class="col-md-1">
+                                                <button type="button" class="btn btn-sm btn-outline-danger remove-field w-100">
+                                                    <i class="bi bi-trash"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <button type="button" class="btn btn-sm btn-outline-primary mt-2" id="add_field">
+                                    <i class="bi bi-plus-circle"></i> Add Field
+                                </button>
+                                <div class="form-text mt-2">
+                                    <strong>Auto-generated tests per field:</strong><br>
+                                    • <strong>String</strong>: SQL injection, XSS, command injection, path traversal, LDAP injection<br>
+                                    • <strong>Integer</strong>: Negative values, overflow, type confusion, SQL injection<br>
+                                    • <strong>Email/URL</strong>: Format validation, SSRF, injection<br>
+                                    • All fields tested with null, empty, special characters, and boundary values
+                                </div>
                             </div>
                         </div>
                         
@@ -437,6 +559,61 @@ async def root():
         <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
         
         <script>
+            // Add/Remove Field functionality
+            let fieldCounter = 2;
+            
+            document.getElementById('add_field').addEventListener('click', function() {
+                fieldCounter++;
+                const container = document.getElementById('fields_container');
+                const newField = document.createElement('div');
+                newField.className = 'field-item border rounded p-3 mb-2';
+                newField.innerHTML = `
+                    <div class="row align-items-end">
+                        <div class="col-md-4">
+                            <label class="form-label small">Field Name</label>
+                            <input type="text" class="form-control form-control-sm field-name" 
+                                   placeholder="e.g., email">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small">Data Type</label>
+                            <select class="form-select form-select-sm field-type">
+                                <option value="string" selected>String</option>
+                                <option value="integer">Integer</option>
+                                <option value="float">Float</option>
+                                <option value="boolean">Boolean</option>
+                                <option value="email">Email</option>
+                                <option value="url">URL</option>
+                                <option value="json">JSON Object</option>
+                                <option value="array">Array</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Sample Value</label>
+                            <input type="text" class="form-control form-control-sm field-value" 
+                                   placeholder="Sample value">
+                        </div>
+                        <div class="col-md-1">
+                            <button type="button" class="btn btn-sm btn-outline-danger remove-field w-100">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(newField);
+            });
+            
+            // Remove field (event delegation)
+            document.getElementById('fields_container').addEventListener('click', function(e) {
+                if (e.target.closest('.remove-field')) {
+                    const fieldItems = document.querySelectorAll('.field-item');
+                    if (fieldItems.length > 1) {
+                        e.target.closest('.field-item').remove();
+                    } else {
+                        alert('You must have at least one field!');
+                    }
+                }
+            });
+            
             // Toggle password visibility
             document.getElementById('toggleSecret').addEventListener('click', function() {
                 const secretInput = document.getElementById('shared_secret');
@@ -462,11 +639,64 @@ async def root():
                     standards.push(cb.value);
                 });
                 
+                // Collect all field definitions
+                const fields = [];
+                document.querySelectorAll('.field-item').forEach(item => {
+                    const name = item.querySelector('.field-name').value.trim();
+                    const type = item.querySelector('.field-type').value;
+                    const value = item.querySelector('.field-value').value.trim();
+                    
+                    if (name) {
+                        fields.push({
+                            name: name,
+                            type: type,
+                            sample_value: value || null
+                        });
+                    }
+                });
+                
+                if (fields.length === 0) {
+                    alert('Please define at least one field!');
+                    return;
+                }
+                
+                // Build a sample payload from fields
+                const samplePayload = {};
+                fields.forEach(field => {
+                    if (field.sample_value) {
+                        // Try to convert to appropriate type
+                        if (field.type === 'integer') {
+                            samplePayload[field.name] = parseInt(field.sample_value) || 0;
+                        } else if (field.type === 'float') {
+                            samplePayload[field.name] = parseFloat(field.sample_value) || 0.0;
+                        } else if (field.type === 'boolean') {
+                            samplePayload[field.name] = field.sample_value.toLowerCase() === 'true';
+                        } else if (field.type === 'json') {
+                            try {
+                                samplePayload[field.name] = JSON.parse(field.sample_value);
+                            } catch {
+                                samplePayload[field.name] = {};
+                            }
+                        } else if (field.type === 'array') {
+                            try {
+                                samplePayload[field.name] = JSON.parse(field.sample_value);
+                            } catch {
+                                samplePayload[field.name] = [];
+                            }
+                        } else {
+                            samplePayload[field.name] = field.sample_value;
+                        }
+                    } else {
+                        samplePayload[field.name] = null;
+                    }
+                });
+                
                 // Prepare request data
                 const formData = {
                     target_url: document.getElementById('target_url').value,
                     http_method: document.getElementById('http_method').value,
-                    sample_valid_payload: document.getElementById('sample_payload').value,
+                    sample_valid_payload: JSON.stringify(samplePayload),
+                    payload_schema: fields,  // Send field schema
                     signature_header_name: document.getElementById('signature_header').value,
                     signature_prefix: document.getElementById('signature_prefix').value,
                     timestamp_header_name: document.getElementById('timestamp_header').value,
@@ -581,6 +811,7 @@ async def root():
                                     <i class="bi bi-${icon}"></i> ${result.status}
                                 </span>
                             </div>
+                            ${result.payload_name ? `<div class="badge bg-secondary mb-2"><i class="bi bi-file-code"></i> ${result.payload_name}</div>` : ''}
                             <h5 class="card-title">${result.name}</h5>
                             <p class="card-text"><strong>Details:</strong> ${result.details}</p>
                     `;
@@ -615,29 +846,181 @@ async def root():
     """
 
 
+def generate_injection_payloads(schema: List[FieldSchema]) -> List[TestPayload]:
+    """
+    Generate injection test payloads based on field schema.
+    
+    For each field, generates targeted injection payloads based on its data type.
+    """
+    from webhook_auditor.scanner.injection_tests import INJECTION_PAYLOADS
+    
+    test_payloads = []
+    
+    # Build base payload from schema
+    base_payload = {}
+    for field in schema:
+        if field.sample_value:
+            if field.type == 'integer':
+                try:
+                    base_payload[field.name] = int(field.sample_value)
+                except:
+                    base_payload[field.name] = 0
+            elif field.type == 'float':
+                try:
+                    base_payload[field.name] = float(field.sample_value)
+                except:
+                    base_payload[field.name] = 0.0
+            elif field.type == 'boolean':
+                base_payload[field.name] = field.sample_value.lower() in ['true', '1', 'yes']
+            else:
+                base_payload[field.name] = field.sample_value
+        else:
+            base_payload[field.name] = None
+    
+    # Generate injection tests for each field
+    for field in schema:
+        field_name = field.name
+        field_type = field.type
+        
+        # SQL Injection tests for string/integer fields
+        if field_type in ['string', 'integer', 'email', 'url']:
+            for i, sql_payload in enumerate(INJECTION_PAYLOADS.get("sql", [])[:3]):  # Top 3 SQL injections
+                test_data = base_payload.copy()
+                test_data[field_name] = sql_payload
+                test_payloads.append(TestPayload(
+                    name=f"SQL Injection on '{field_name}' #{i+1}",
+                    data=json.dumps(test_data)
+                ))
+        
+        # XSS tests for string fields
+        if field_type in ['string', 'email', 'url']:
+            for i, xss_payload in enumerate(INJECTION_PAYLOADS.get("xss", [])[:3]):
+                test_data = base_payload.copy()
+                test_data[field_name] = xss_payload
+                test_payloads.append(TestPayload(
+                    name=f"XSS Injection on '{field_name}' #{i+1}",
+                    data=json.dumps(test_data)
+                ))
+        
+        # Command Injection for string fields
+        if field_type == 'string':
+            for i, cmd_payload in enumerate(INJECTION_PAYLOADS.get("command", [])[:2]):
+                test_data = base_payload.copy()
+                test_data[field_name] = cmd_payload
+                test_payloads.append(TestPayload(
+                    name=f"Command Injection on '{field_name}' #{i+1}",
+                    data=json.dumps(test_data)
+                ))
+        
+        # Path Traversal for string fields
+        if field_type == 'string':
+            for i, path_payload in enumerate(INJECTION_PAYLOADS.get("path_traversal", [])[:2]):
+                test_data = base_payload.copy()
+                test_data[field_name] = path_payload
+                test_payloads.append(TestPayload(
+                    name=f"Path Traversal on '{field_name}' #{i+1}",
+                    data=json.dumps(test_data)
+                ))
+        
+        # NoSQL Injection for string fields
+        if field_type == 'string':
+            for i, nosql_payload in enumerate(INJECTION_PAYLOADS.get("nosql", [])[:2]):
+                test_data = base_payload.copy()
+                test_data[field_name] = nosql_payload
+                test_payloads.append(TestPayload(
+                    name=f"NoSQL Injection on '{field_name}' #{i+1}",
+                    data=json.dumps(test_data)
+                ))
+        
+        # Integer overflow/underflow tests
+        if field_type in ['integer', 'float']:
+            overflow_values = [
+                -2147483648,  # INT_MIN
+                2147483647,   # INT_MAX
+                -1,
+                0,
+                999999999999,
+                "' OR '1'='1",  # SQL injection in int field
+            ]
+            for i, val in enumerate(overflow_values[:4]):
+                test_data = base_payload.copy()
+                test_data[field_name] = val
+                test_payloads.append(TestPayload(
+                    name=f"Integer Boundary Test on '{field_name}' #{i+1}",
+                    data=json.dumps(test_data)
+                ))
+        
+        # Type confusion tests
+        type_confusion_values = [
+            None,
+            "",
+            "null",
+            "undefined",
+            [],
+            {},
+        ]
+        for i, val in enumerate(type_confusion_values[:3]):
+            test_data = base_payload.copy()
+            test_data[field_name] = val
+            test_payloads.append(TestPayload(
+                name=f"Type Confusion on '{field_name}' #{i+1}",
+                data=json.dumps(test_data)
+            ))
+    
+    return test_payloads
+
+
 @app.post("/api/scan", response_model=ScanResponse)
 async def scan_webhook(request: ScanRequest):
     """
     Run a comprehensive security scan against a webhook endpoint.
     
     Performs security tests based on selected standards (STRIDE, PCI-DSS, OWASP).
+    Automatically generates injection tests based on payload schema.
     """
     try:
-        # Create scanner configuration
-        config = ScannerSettings(
-            target_url=request.target_url,
-            http_method=request.http_method,
-            shared_secret=request.shared_secret,
-            signature_header_name=request.signature_header_name,
-            timestamp_header_name=request.timestamp_header_name,
-            sample_valid_payload=request.sample_valid_payload,
-            signature_prefix=request.signature_prefix,
-            custom_headers=request.custom_headers,
-            test_standards=request.test_standards if request.test_standards else ["STRIDE"]
-        )
+        # Determine which payloads to test
+        payloads_to_test = []
         
-        # Run all tests using orchestrator
-        all_results = await run_stride_tests(config)
+        # Priority 1: If payload_schema is provided, generate injection tests
+        if request.payload_schema and len(request.payload_schema) > 0:
+            payloads_to_test = generate_injection_payloads(request.payload_schema)
+            print(f"✨ Generated {len(payloads_to_test)} injection test payloads from schema")
+        
+        # Priority 2: Use test_payloads if provided
+        elif request.test_payloads and len(request.test_payloads) > 0:
+            payloads_to_test = request.test_payloads
+        
+        # Priority 3: Fallback to single default payload
+        else:
+            payloads_to_test = [TestPayload(name="Default", data=request.sample_valid_payload)]
+        
+        all_results = []
+        
+        # Run tests for each payload
+        for idx, payload in enumerate(payloads_to_test, 1):
+            # Create scanner configuration with this payload
+            config = ScannerSettings(
+                target_url=request.target_url,
+                http_method=request.http_method,
+                shared_secret=request.shared_secret,
+                signature_header_name=request.signature_header_name,
+                timestamp_header_name=request.timestamp_header_name,
+                sample_valid_payload=payload.data,
+                signature_prefix=request.signature_prefix,
+                custom_headers=request.custom_headers,
+                test_standards=request.test_standards if request.test_standards else ["STRIDE"]
+            )
+            
+            # Run all tests using orchestrator
+            payload_results = await run_stride_tests(config)
+            
+            # Add payload info to each result
+            for result in payload_results:
+                if len(payloads_to_test) > 1:
+                    result["payload_name"] = f"[{idx}/{len(payloads_to_test)}] {payload.name}"
+                    result["name"] = f"{result['name']}"
+                all_results.append(result)
         
         # Calculate statistics
         total_tests = len(all_results)
