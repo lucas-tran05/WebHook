@@ -218,7 +218,6 @@ async def root():
             * { font-family: 'Inter', sans-serif; }
             
             body {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 min-height: 100vh;
                 padding: 20px 0;
             }
@@ -232,7 +231,7 @@ async def root():
             }
             
             .header-section {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                background: #BC2626;
                 color: white;
                 padding: 40px;
                 text-align: center;
@@ -266,7 +265,7 @@ async def root():
             }
             
             .btn-scan {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                background: #BC2626;
                 border: none;
                 padding: 15px;
                 font-weight: 600;
