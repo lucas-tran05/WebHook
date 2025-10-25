@@ -78,12 +78,122 @@ class ScanResponse(BaseModel):
     passed: int
     failed: int
     warnings: int
+    security_score: float = Field(default=10.0, description="Security score from 0-10")
+    score_rating: str = Field(default="🟢 EXCELLENT", description="Rating based on score")
     results: List[Dict]
     summary: str
 
 
 # Store scan results in memory (in production, use a database)
 scan_results_cache = {}
+
+
+# ===== SECURITY SCORING SYSTEM =====
+# Hệ thống chấm điểm mới:
+# - Mỗi test: 1 điểm nếu PASS (server từ chối đúng), 0 điểm nếu FAIL (server chấp nhận sai)
+# - Điểm cuối cùng = (Số test PASS / Tổng số test) * 10
+# - Ví dụ: 8/10 test pass => điểm = 8.0/10
+
+
+def calculate_security_score(test_results: List[Dict]) -> dict:
+    """
+    Tính điểm bảo mật dựa trên kết quả test.
+    
+    Nguyên tắc:
+    - Mỗi test được chấm điểm riêng: 1 điểm nếu PASS, 0 điểm nếu FAIL
+    - Điểm cuối cùng = (Tổng điểm PASS / Tổng số test) * 10
+    - Test FAIL do chấp nhận request không hợp lệ (200 OK) sẽ là 0 điểm
+    
+    Returns:
+        dict với:
+        - score: Điểm từ 0-10
+        - rating: Đánh giá (EXCELLENT/GOOD/FAIR/POOR/CRITICAL)
+        - test_scores: Điểm chi tiết từng test
+        - vulnerabilities: Danh sách lỗ hổng
+    """
+    total_tests = 0
+    passed_tests = 0
+    test_scores = []
+    vulnerabilities = []
+    
+    for result in test_results:
+        status = result.get("status", "")
+        test_name = result.get("name", "")
+        test_category = result.get("category", "")
+        response_status = result.get("response_status", 0)
+        
+        # Đếm tổng số test (không tính WARN)
+        if status in ["PASS", "FAIL"]:
+            total_tests += 1
+            
+            if status == "PASS":
+                # Test PASS = 1 điểm
+                passed_tests += 1
+                test_scores.append({
+                    "test": test_name,
+                    "category": test_category,
+                    "score": 1.0,
+                    "status": "PASS",
+                    "response_status": response_status
+                })
+            else:  # FAIL
+                # Test FAIL = 0 điểm
+                test_scores.append({
+                    "test": test_name,
+                    "category": test_category,
+                    "score": 0.0,
+                    "status": "FAIL",
+                    "response_status": response_status
+                })
+                
+                # Xác định mức độ nghiêm trọng dựa trên loại test
+                severity = "MEDIUM"
+                if "Spoofing" in test_name or "Authentication" in test_name:
+                    severity = "CRITICAL"
+                elif "Tampering" in test_name:
+                    severity = "HIGH"
+                elif "Injection" in test_name or "SSRF" in test_name:
+                    severity = "CRITICAL"
+                elif "CHD" in test_name or "PCI" in test_name:
+                    severity = "CRITICAL"
+                
+                vulnerabilities.append({
+                    "test": test_name,
+                    "category": test_category,
+                    "severity": severity,
+                    "response_status": response_status,
+                    "description": result.get("details", ""),
+                    "risk": result.get("risk", "Security vulnerability detected"),
+                    "mitigation": result.get("mitigation", "Review and implement proper security controls")
+                })
+    
+    # Tính điểm cuối cùng
+    if total_tests > 0:
+        score = (passed_tests / total_tests) * 10.0
+    else:
+        score = 10.0  # Không có test nào => full điểm
+    
+    # Xác định rating
+    if score >= 9.0:
+        rating = "🟢 EXCELLENT"
+    elif score >= 7.0:
+        rating = "🟡 GOOD"
+    elif score >= 5.0:
+        rating = "🟠 FAIR"
+    elif score >= 3.0:
+        rating = "🔴 POOR"
+    else:
+        rating = "🚨 CRITICAL"
+    
+    return {
+        "score": round(score, 1),
+        "rating": rating,
+        "total_tests": total_tests,
+        "passed_tests": passed_tests,
+        "failed_tests": total_tests - passed_tests,
+        "test_scores": test_scores,
+        "vulnerabilities": vulnerabilities
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -895,19 +1005,22 @@ def generate_schema_based_tests(schema: List[FieldSchema], standards: List[str])
             # ===== STRIDE THREAT MODEL TESTS =====
             
             # 1. SPOOFING (Authentication)
+            # Test không có signature - sẽ gửi request không kèm signature header
             result["payloads"].append(TestPayload(
-                name="[STRIDE-Spoofing] Request without authentication",
-                data=json.dumps({"__skip_signature__": True, **base_payload})
+                name="[STRIDE-Spoofing] Request without signature header",
+                data=json.dumps({"__test_type__": "no_signature", **base_payload})
             ))
             
+            # Test signature không hợp lệ - sẽ gửi signature sai
             result["payloads"].append(TestPayload(
                 name="[STRIDE-Spoofing] Request with invalid signature",
-                data=json.dumps({"__invalid_signature__": True, **base_payload})
+                data=json.dumps({"__test_type__": "invalid_signature", **base_payload})
             ))
             
+            # Test signature rỗng
             result["payloads"].append(TestPayload(
                 name="[STRIDE-Spoofing] Request with empty signature",
-                data=json.dumps({"__empty_signature__": True, **base_payload})
+                data=json.dumps({"__test_type__": "empty_signature", **base_payload})
             ))
             
             # 2. TAMPERING (Integrity)
@@ -927,9 +1040,15 @@ def generate_schema_based_tests(schema: List[FieldSchema], standards: List[str])
             ))
             
             # 3. REPUDIATION (Logging & Audit Trail)
+            # Test không có timestamp header - sẽ gửi request không kèm timestamp
+            result["payloads"].append(TestPayload(
+                name="[STRIDE-Repudiation] Request without timestamp header",
+                data=json.dumps({"__test_type__": "no_timestamp", **base_payload})
+            ))
+            
             result["payloads"].append(TestPayload(
                 name="[STRIDE-Repudiation] Logging mechanism check",
-                data=json.dumps({"__check_logging__": True, **base_payload})
+                data=json.dumps(base_payload)
             ))
             
             old_timestamp_payload = base_payload.copy()
@@ -937,11 +1056,6 @@ def generate_schema_based_tests(schema: List[FieldSchema], standards: List[str])
             result["payloads"].append(TestPayload(
                 name="[STRIDE-Repudiation] Replay attack with old timestamp",
                 data=json.dumps(old_timestamp_payload)
-            ))
-            
-            result["payloads"].append(TestPayload(
-                name="[STRIDE-Repudiation] Duplicate request detection",
-                data=json.dumps({"__duplicate_request__": True, **base_payload})
             ))
             
             # 4. INFORMATION DISCLOSURE
@@ -1335,19 +1449,57 @@ async def scan_webhook(request: ScanRequest):
                     try:
                         # Parse the payload
                         payload_dict = json.loads(payload.data)
-                        payload_bytes = payload.data.encode('utf-8')
+                        
+                        # Lấy test type và xóa khỏi payload
+                        test_type = payload_dict.pop("__test_type__", None)
+                        
+                        # Tái tạo payload không có __test_type__
+                        clean_payload = json.dumps(payload_dict)
+                        payload_bytes = clean_payload.encode('utf-8')
                         
                         # Prepare headers
                         headers = {"Content-Type": "application/json"}
                         if request.custom_headers:
                             headers.update(request.custom_headers)
                         
-                        # Add signature if secret provided
-                        if request.shared_secret:
-                            from webhook_auditor.utils.crypto import calculate_hmac_signature
-                            secret_bytes = request.shared_secret.encode('utf-8')
-                            signature = calculate_hmac_signature(secret_bytes, payload_bytes, request.signature_prefix)
-                            headers[request.signature_header_name] = signature
+                        # Xử lý signature dựa trên test_type
+                        should_add_signature = True
+                        signature_to_use = None
+                        
+                        if test_type == "no_signature":
+                            # Không thêm signature header
+                            should_add_signature = False
+                        elif test_type == "invalid_signature":
+                            # Thêm signature sai
+                            signature_to_use = request.signature_prefix + "invalid_signature_12345"
+                            should_add_signature = True
+                        elif test_type == "empty_signature":
+                            # Thêm signature rỗng
+                            signature_to_use = request.signature_prefix
+                            should_add_signature = True
+                        elif test_type == "no_timestamp":
+                            # Không thêm timestamp header (nhưng vẫn có signature)
+                            if request.shared_secret:
+                                from webhook_auditor.utils.crypto import calculate_hmac_signature
+                                secret_bytes = request.shared_secret.encode('utf-8')
+                                signature_to_use = calculate_hmac_signature(secret_bytes, payload_bytes, request.signature_prefix)
+                                should_add_signature = True
+                        else:
+                            # Test bình thường - thêm signature nếu có secret
+                            if request.shared_secret:
+                                from webhook_auditor.utils.crypto import calculate_hmac_signature
+                                secret_bytes = request.shared_secret.encode('utf-8')
+                                signature_to_use = calculate_hmac_signature(secret_bytes, payload_bytes, request.signature_prefix)
+                                should_add_signature = True
+                        
+                        # Thêm signature header nếu cần
+                        if should_add_signature and signature_to_use:
+                            headers[request.signature_header_name] = signature_to_use
+                        
+                        # Thêm timestamp header (trừ khi test là no_timestamp)
+                        if test_type != "no_timestamp" and request.timestamp_header_name:
+                            import time
+                            headers[request.timestamp_header_name] = str(int(time.time()))
                         
                         # Send request
                         response = await client.request(
@@ -1371,54 +1523,103 @@ async def scan_webhook(request: ScanRequest):
                         elif "OWASP" in payload.name:
                             category = "OWASP Top 10"
                         
-                        # Determine result
-                        if 400 <= status < 500:
-                            # Server rejected - PASS
-                            all_results.append({
-                                "category": category,
-                                "name": payload.name,
-                                "status": "PASS",
-                                "details": f"Server properly rejected malicious payload (HTTP {status})",
-                                "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}"
-                            })
-                        elif status == 200:
-                            # Server accepted - check for danger signs
-                            danger_signs = [
-                                "error", "exception", "syntax", "mysql", "postgresql", 
-                                "sqlite", "oracle", "warning", "undefined", "null",
-                                "stack trace", "line ", "file:", "/usr/", "/etc/",
-                                "root:", "admin", "password"
-                            ]
-                            
-                            found_danger = any(sign in response_text.lower() for sign in danger_signs)
-                            
-                            if found_danger:
+                        # Determine result based on test type and status code
+                        is_auth_test = test_type in ["no_signature", "invalid_signature", "empty_signature"]
+                        is_replay_test = test_type == "no_timestamp"
+                        is_tampering_test = "Tampering" in payload.name
+                        
+                        # LOGIC CHẤM ĐIỂM:
+                        # - Test authentication/signature: nếu status = 200 (chấp nhận) => FAIL
+                        # - Test injection/malicious: nếu status = 200 + có dấu hiệu nguy hiểm => FAIL
+                        # - Test bình thường: nếu status = 4xx (từ chối) => PASS
+                        
+                        if is_auth_test or is_replay_test or is_tampering_test:
+                            # Các test bảo mật quan trọng
+                            if 200 <= status < 300:
+                                # Server chấp nhận request không hợp lệ => FAIL
                                 all_results.append({
                                     "category": category,
                                     "name": payload.name,
                                     "status": "FAIL",
-                                    "details": f"Server accepted payload and response contains suspicious content (HTTP {status})",
-                                    "risk": "Potential vulnerability - server may be processing malicious input without proper validation",
-                                    "mitigation": "Implement input validation, sanitization, and use parameterized queries. Escape special characters.",
-                                    "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}"
+                                    "details": f"🔴 Server accepted request without proper validation (HTTP {status}). Expected rejection (4xx).",
+                                    "risk": "Critical security vulnerability - server accepts unauthenticated or tampered requests",
+                                    "mitigation": "Implement proper signature validation, timestamp checking, and reject invalid requests with 401/403",
+                                    "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}",
+                                    "response_status": status
                                 })
-                            else:
+                            elif 400 <= status < 500:
+                                # Server từ chối đúng => PASS
                                 all_results.append({
                                     "category": category,
                                     "name": payload.name,
                                     "status": "PASS",
-                                    "details": f"Server handled payload safely without exposing sensitive information (HTTP {status})",
-                                    "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}"
+                                    "details": f"✅ Server properly rejected invalid request (HTTP {status})",
+                                    "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}",
+                                    "response_status": status
+                                })
+                            else:
+                                # Status code khác
+                                all_results.append({
+                                    "category": category,
+                                    "name": payload.name,
+                                    "status": "WARN",
+                                    "details": f"⚠️ Unexpected response: HTTP {status}",
+                                    "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}",
+                                    "response_status": status
                                 })
                         else:
-                            # Other status codes
-                            all_results.append({
-                                "category": category,
-                                "name": payload.name,
-                                "status": "WARN",
-                                "details": f"Unexpected response: HTTP {status}",
-                                "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}"
-                            })
+                            # Các test về injection/malicious payload
+                            if 400 <= status < 500:
+                                # Server rejected - PASS
+                                all_results.append({
+                                    "category": category,
+                                    "name": payload.name,
+                                    "status": "PASS",
+                                    "details": f"✅ Server properly rejected malicious payload (HTTP {status})",
+                                    "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}",
+                                    "response_status": status
+                                })
+                            elif 200 <= status < 300:
+                                # Server accepted - check for danger signs
+                                danger_signs = [
+                                    "error", "exception", "syntax", "mysql", "postgresql", 
+                                    "sqlite", "oracle", "warning", "undefined", "null",
+                                    "stack trace", "line ", "file:", "/usr/", "/etc/",
+                                    "root:", "admin", "password", "database", "query"
+                                ]
+                                
+                                found_danger = any(sign in response_text.lower() for sign in danger_signs)
+                                
+                                if found_danger:
+                                    all_results.append({
+                                        "category": category,
+                                        "name": payload.name,
+                                        "status": "FAIL",
+                                        "details": f"🔴 Server accepted payload and response contains suspicious content (HTTP {status})",
+                                        "risk": "Potential vulnerability - server may be processing malicious input without proper validation",
+                                        "mitigation": "Implement input validation, sanitization, and use parameterized queries. Escape special characters.",
+                                        "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}",
+                                        "response_status": status
+                                    })
+                                else:
+                                    all_results.append({
+                                        "category": category,
+                                        "name": payload.name,
+                                        "status": "PASS",
+                                        "details": f"✅ Server handled payload safely without exposing sensitive information (HTTP {status})",
+                                        "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}",
+                                        "response_status": status
+                                    })
+                            else:
+                                # Other status codes
+                                all_results.append({
+                                    "category": category,
+                                    "name": payload.name,
+                                    "status": "WARN",
+                                    "details": f"⚠️ Unexpected response: HTTP {status}",
+                                    "payload_name": f"[{idx}/{len(test_payloads)}] {payload.name}",
+                                    "response_status": status
+                                })
                     
                     except Exception as e:
                         all_results.append({
@@ -1467,13 +1668,18 @@ async def scan_webhook(request: ScanRequest):
         failed = sum(1 for r in all_results if r.get("status") == "FAIL")
         warnings = sum(1 for r in all_results if r.get("status") == "WARN")
         
-        # Generate summary
+        # Calculate security score
+        scoring_result = calculate_security_score(all_results)
+        security_score = scoring_result["score"]
+        score_rating = scoring_result["rating"]
+        
+        # Generate summary with score
         if failed == 0:
-            summary = "✅ All security tests passed! Your webhook endpoint is secure."
+            summary = f"✅ All security tests passed! Security Score: {security_score}/10 ({score_rating})"
         elif failed <= 2:
-            summary = f"⚠️ {failed} security issue(s) detected. Review and fix them."
+            summary = f"⚠️ {failed} security issue(s) detected. Security Score: {security_score}/10 ({score_rating})"
         else:
-            summary = f"❌ {failed} security vulnerabilities detected! Immediate action required."
+            summary = f"❌ {failed} security vulnerabilities detected! Security Score: {security_score}/10 ({score_rating})"
         
         # Generate scan ID
         scan_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -1486,6 +1692,8 @@ async def scan_webhook(request: ScanRequest):
             passed=passed,
             failed=failed,
             warnings=warnings,
+            security_score=security_score,
+            score_rating=score_rating,
             results=all_results,
             summary=summary
         )
