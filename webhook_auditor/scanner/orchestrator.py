@@ -1,14 +1,9 @@
 """Orchestrator for running all security tests based on selected standards."""
 import httpx
 from .config import ScannerSettings
-from .spoofing_tests import run_spoofing_tampering_tests
-from .repudiation_tests import run_repudiation_tests
-from .info_disclosure_tests import run_info_disclosure_tests
-from .dos_tests import run_dos_tests
-from .privilege_escalation_tests import run_privilege_escalation_tests
-from .injection_tests import run_injection_tests
-from .pci_dss_tests import run_pci_dss_tests
-from .owasp_tests import run_owasp_tests
+from .stride import run_stride_tests
+from .pci_dss import run_pci_dss_tests
+from .owasp import run_owasp_tests
 from ..utils.reporter import generate_report
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -45,44 +40,13 @@ async def run_all_tests(config: ScannerSettings):
             
             # STRIDE Tests
             if "STRIDE" in standards:
-                # Run Spoofing & Tampering tests
-                task = progress.add_task("[cyan]Testing Spoofing & Tampering...", total=None)
-                results = await run_spoofing_tampering_tests(config, client)
-                all_results.extend(results)
-                progress.update(task, completed=True)
-                
-                # Run Repudiation tests
-                task = progress.add_task("[cyan]Testing Repudiation...", total=None)
-                results = await run_repudiation_tests(config, client)
-                all_results.extend(results)
-                progress.update(task, completed=True)
-                
-                # Run Information Disclosure tests
-                task = progress.add_task("[cyan]Testing Information Disclosure...", total=None)
-                results = await run_info_disclosure_tests(config, client)
-                all_results.extend(results)
-                progress.update(task, completed=True)
-                
-                # Run Denial of Service tests
-                task = progress.add_task("[cyan]Testing Denial of Service...", total=None)
-                results = await run_dos_tests(config, client)
-                all_results.extend(results)
-                progress.update(task, completed=True)
-                
-                # Run Elevation of Privilege tests
-                task = progress.add_task("[cyan]Testing Elevation of Privilege...", total=None)
-                results = await run_privilege_escalation_tests(config, client)
-                all_results.extend(results)
-                progress.update(task, completed=True)
-                
-                # Run Injection tests
-                task = progress.add_task("[cyan]Testing Injection Attacks...", total=None)
-                results = await run_injection_tests(config, client)
+                task = progress.add_task("[cyan]Testing STRIDE Security Model...", total=None)
+                results = await run_stride_tests(config, client)
                 all_results.extend(results)
                 progress.update(task, completed=True)
             
             # PCI DSS Tests
-            if "PCI-DSS" in standards or "PCI DSS" in standards:
+            if any(std in standards for std in ["PCI-DSS", "PCI DSS", "PCI_DSS", "pci_dss"]):
                 task = progress.add_task("[cyan]Testing PCI DSS Compliance...", total=None)
                 results = await run_pci_dss_tests(config)
                 all_results.extend(results)

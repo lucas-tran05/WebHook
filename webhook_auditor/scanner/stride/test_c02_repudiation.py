@@ -1,9 +1,38 @@
-"""Repudiation security tests (replay attacks and timestamp validation)."""
-import httpx
-from typing import List, Dict
-from datetime import datetime, timedelta
-from ..utils.crypto import calculate_hmac_signature
+"""
+Repudiation Tests for STRIDE Threat Model
+
+Tests for replay attack prevention and timestamp validation.
+"""
+
 import time
+from datetime import datetime, timedelta
+from typing import Dict, List
+import httpx
+from ...utils.crypto import calculate_hmac_signature
+
+
+def capture_response_data(response) -> dict:
+    """
+    Capture response data for later analysis.
+    
+    Args:
+        response: HTTP response object
+    
+    Returns:
+        Dictionary containing response details
+    """
+    try:
+        return {
+            "status_code": response.status_code,
+            "headers": dict(response.headers),
+            "body": response.text[:10000],  # Limit to 10KB to avoid memory issues
+            "elapsed_ms": response.elapsed.total_seconds() * 1000
+        }
+    except Exception as e:
+        return {
+            "status_code": getattr(response, 'status_code', None),
+            "error": str(e)
+        }
 
 
 async def run_repudiation_tests(config, client: httpx.AsyncClient) -> List[Dict]:
@@ -24,7 +53,7 @@ async def run_repudiation_tests(config, client: httpx.AsyncClient) -> List[Dict]
     # Check if shared secret is provided
     if not config.shared_secret:
         results.append({
-            "category": "Repudiation",
+            "category": "STRIDE - C02 Repudiation",
             "name": "Replay Attack Tests",
             "status": "WARN",
             "details": "Skipped - No shared secret provided. These tests require HMAC signature validation."
@@ -58,16 +87,20 @@ async def run_repudiation_tests(config, client: httpx.AsyncClient) -> List[Dict]
                 timeout=10.0
             )
             
+            # Capture response for analysis
+            response_data = capture_response_data(response)
+
+            
             if 400 <= response.status_code < 500:
                 results.append({
-                    "category": "Repudiation",
+                    "category": "STRIDE - C02 Repudiation",
                     "name": "Old Timestamp Check",
                     "status": "PASS",
                     "details": f"Server correctly rejected request with old timestamp (HTTP {response.status_code})"
                 })
             else:
                 results.append({
-                    "category": "Repudiation",
+                    "category": "STRIDE - C02 Repudiation",
                     "name": "Old Timestamp Check",
                     "status": "FAIL",
                     "details": f"Server accepted request with old timestamp (Expected 4xx, Got {response.status_code})",
@@ -76,14 +109,14 @@ async def run_repudiation_tests(config, client: httpx.AsyncClient) -> List[Dict]
                 })
         except Exception as e:
             results.append({
-                "category": "Repudiation",
+                "category": "STRIDE - C02 Repudiation",
                 "name": "Old Timestamp Check",
                 "status": "WARN",
                 "details": f"Test failed with error: {str(e)}"
             })
     else:
         results.append({
-            "category": "Repudiation",
+            "category": "STRIDE - C02 Repudiation",
             "name": "Old Timestamp Check",
             "status": "WARN",
             "details": "Skipped - no timestamp header configured"
@@ -113,6 +146,10 @@ async def run_repudiation_tests(config, client: httpx.AsyncClient) -> List[Dict]
             timeout=10.0
         )
         
+        # Capture response for analysis
+        response_data = capture_response_data(response)
+
+        
         # Small delay
         time.sleep(0.5)
         
@@ -124,24 +161,30 @@ async def run_repudiation_tests(config, client: httpx.AsyncClient) -> List[Dict]
             timeout=10.0
         )
         
+        # Capture response for analysis
+        response_data = capture_response_data(response)
+
+        
         # Check if the second request was rejected
         if response1.status_code < 300 and response2.status_code >= 400:
             results.append({
-                "category": "Repudiation",
+                "category": "STRIDE - C02 Repudiation",
                 "name": "Replay Attack Detection",
                 "status": "PASS",
-                "details": "Server detected and rejected replayed request"
+                "details": "Server detected and rejected replayed request",
+                "response": response_data
             })
         elif response1.status_code >= 400:
             results.append({
-                "category": "Repudiation",
+                "category": "STRIDE - C02 Repudiation",
                 "name": "Replay Attack Detection",
                 "status": "WARN",
-                "details": "Could not test - initial valid request was rejected"
+                "details": "Could not test - initial valid request was rejected",
+                "response": response_data
             })
         else:
             results.append({
-                "category": "Repudiation",
+                "category": "STRIDE - C02 Repudiation",
                 "name": "Replay Attack Detection",
                 "status": "WARN",
                 "details": f"Both requests accepted (HTTP {response1.status_code}, {response2.status_code}) - consider implementing nonce-based replay protection",
@@ -150,7 +193,7 @@ async def run_repudiation_tests(config, client: httpx.AsyncClient) -> List[Dict]
             })
     except Exception as e:
         results.append({
-            "category": "Repudiation",
+            "category": "STRIDE - C02 Repudiation",
             "name": "Replay Attack Detection",
             "status": "WARN",
             "details": f"Test failed with error: {str(e)}"

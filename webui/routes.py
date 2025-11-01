@@ -38,7 +38,7 @@ def register_routes(app: FastAPI) -> None:
             .form-label { font-weight: 600; color: #333; margin-bottom: 8px; }
             .form-control:focus, .form-select:focus { border-color: #667eea; box-shadow: 0 0 0 0.25rem rgba(102, 126, 234, 0.25); }
             .btn-scan { background: #BC2626; border: none; padding: 15px; font-weight: 600; font-size: 1.1rem; transition: transform 0.2s; }
-            .btn-scan:hover { transform: translateY(-2px); box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4); }
+            .btn-scan:hover { transform: translateY(-2px); box-shadow: 0 10px 20px #BC2626; background: #BC2626; opacity: 0.9; }
             .stat-card { text-align: center; padding: 25px; border-radius: 15px; background: white; border: 2px solid #e9ecef; transition: all 0.3s; }
             .stat-card:hover { transform: translateY(-5px); box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
             .stat-number { font-size: 3rem; font-weight: 700; margin-bottom: 5px; }

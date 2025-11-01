@@ -25,20 +25,14 @@ def generate_report(results: List[Dict], target_url: str):
     ))
     console.print()
     
-    # Group results by category
-    categories = {
-        "Spoofing & Tampering": [],
-        "Repudiation": [],
-        "Information Disclosure": [],
-        "Denial of Service": [],
-        "Elevation of Privilege": [],
-        "Injection Attacks": []
-    }
+    # Group results by category (dynamically)
+    categories = {}
     
     for result in results:
         category = result.get("category", "Unknown")
-        if category in categories:
-            categories[category].append(result)
+        if category not in categories:
+            categories[category] = []
+        categories[category].append(result)
     
     # Track overall statistics
     total_tests = len(results)

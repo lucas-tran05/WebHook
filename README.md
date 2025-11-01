@@ -61,14 +61,26 @@ webhook_auditor/
   scanner/
     config.py              # Model cấu hình ScannerSettings
     orchestrator.py        # Điều phối chạy test theo chuẩn đã chọn, gom kết quả
-    spoofing_tests.py      # STRIDE: Spoofing & Tampering (chữ ký, integrity)
-    repudiation_tests.py   # STRIDE: Repudiation (timestamp, chống replay)
-    info_disclosure_tests.py # STRIDE: Information Disclosure (HTTPS, header, error)
-    dos_tests.py           # STRIDE: Denial of Service (payload lớn, rate-limit)
-    privilege_escalation_tests.py # STRIDE: Elevation of Privilege (trường đặc quyền)
-    injection_tests.py     # STRIDE: Injection (SQL/NoSQL/Command/XSS/Path/Template)
-    pci_dss_tests.py       # PCI DSS: TLS, header, logging, SQLi/XSS, v.v.
-    owasp_tests.py         # OWASP Top 10: Access Control, Headers, Injection, SSRF...
+    
+    stride/                # STRIDE Security Tests (Threat Model)
+      __init__.py
+      stride_tests.py      # Gộp tất cả 6 loại test STRIDE:
+                           #   - Spoofing & Tampering (chữ ký, integrity)
+                           #   - Repudiation (timestamp, chống replay)
+                           #   - Information Disclosure (HTTPS, header, error)
+                           #   - Denial of Service (payload lớn, rate-limit)
+                           #   - Elevation of Privilege (trường đặc quyền)
+                           #   - Injection (SQL/NoSQL/Command/XSS/Path/Template)
+    
+    pci_dss/               # PCI DSS Compliance Tests
+      __init__.py
+      pci_dss_tests.py     # TLS, cipher, header, logging/audit, SQLi/XSS, v.v.
+    
+    owasp/                 # OWASP Top 10 Tests
+      __init__.py
+      owasp_tests.py       # A01-A10: Access Control, Crypto, Injection, 
+                           # Headers, Auth, Integrity, Logging, SSRF
+  
   utils/
     crypto.py              # Tính/kiểm tra chữ ký HMAC
     reporter.py            # In báo cáo kết quả đẹp bằng rich

